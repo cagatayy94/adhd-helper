@@ -511,9 +511,11 @@ class FamilyControlsManager: ObservableObject {
         
         let center = DeviceActivityCenter()
         
-        // Schedule: daily monitoring
+        // Schedule: daily monitoring starting from current time to ensure it is active immediately today
+        let calendar = Calendar.current
+        let startComponents = calendar.dateComponents([.hour, .minute], from: Date())
         let schedule = DeviceActivitySchedule(
-            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalStart: startComponents,
             intervalEnd: DateComponents(hour: 23, minute: 59),
             repeats: true
         )
