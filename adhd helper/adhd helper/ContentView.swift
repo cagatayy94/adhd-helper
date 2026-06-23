@@ -7,6 +7,9 @@
 
 import SwiftUI
 import Combine
+import FamilyControls
+import DeviceActivity
+import ManagedSettings
 
 // MARK: - Enums & Models
 
@@ -37,9 +40,38 @@ struct CalendarDay: Identifiable, Hashable {
     let isToday: Bool
 }
 
+struct AppLimit: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var title: String
+    var selection: FamilyActivitySelection
+    var threshold: String // "1m", "15m", "30m", "1h", "2h", "3h"
+    var isActive: Bool = true
+}
+
 struct DailyLog: Codable, Equatable {
     // Map of Habit ID String (UUID) to completion count for that day
     var completions: [String: Int] = [:]
+    var screenTimeLimitMinutes: Int = 180
+    var categoryMinutes: [String: Int] = [:]
+
+    enum CodingKeys: String, CodingKey {
+        case completions
+        case screenTimeLimitMinutes
+        case categoryMinutes
+    }
+
+    init(completions: [String: Int] = [:], screenTimeLimitMinutes: Int = 180, categoryMinutes: [String: Int] = [:]) {
+        self.completions = completions
+        self.screenTimeLimitMinutes = screenTimeLimitMinutes
+        self.categoryMinutes = categoryMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.completions = try container.decodeIfPresent([String: Int].self, forKey: .completions) ?? [:]
+        self.screenTimeLimitMinutes = try container.decodeIfPresent(Int.self, forKey: .screenTimeLimitMinutes) ?? 180
+        self.categoryMinutes = try container.decodeIfPresent([String: Int].self, forKey: .categoryMinutes) ?? [:]
+    }
 }
 
 // MARK: - Hex Color Extension
@@ -117,6 +149,7 @@ final class CalendarViewModel: ObservableObject {
     } // Defaults to today
     @Published var habits: [Habit] = []
     @Published var dailyLogs: [String: DailyLog] = [:]
+    @Published var appLimits: [AppLimit] = []
     
     let monthYearFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -153,6 +186,7 @@ final class CalendarViewModel: ObservableObject {
     init() {
         loadHabits()
         loadLogs()
+        loadAppLimits()
     }
     
     // MARK: - Actions & Intents
@@ -289,6 +323,104 @@ final class CalendarViewModel: ObservableObject {
         saveLogs()
     }
     
+    // MARK: - Screen Time Logic
+    
+    func getScreenTimeLimit(for date: Date) -> Int {
+        let key = keyFormatter.string(from: date)
+        let log = dailyLogs[key] ?? DailyLog()
+        return log.screenTimeLimitMinutes
+    }
+    
+    func setScreenTimeLimit(for date: Date, limit: Int) {
+        let key = keyFormatter.string(from: date)
+        var log = dailyLogs[key] ?? DailyLog()
+        log.screenTimeLimitMinutes = limit
+        dailyLogs[key] = log
+        saveLogs()
+    }
+    
+    func getCategoryMinutes(for date: Date, category: String) -> Int {
+        let key = keyFormatter.string(from: date)
+        let log = dailyLogs[key] ?? DailyLog()
+        return log.categoryMinutes[category] ?? 0
+    }
+    
+    func updateCategoryMinutes(for date: Date, category: String, minutes: Int) {
+        let key = keyFormatter.string(from: date)
+        var log = dailyLogs[key] ?? DailyLog()
+        log.categoryMinutes[category] = max(0, minutes)
+        dailyLogs[key] = log
+        saveLogs()
+    }
+    
+    func getTotalScreenTime(for date: Date) -> Int {
+        let key = keyFormatter.string(from: date)
+        let log = dailyLogs[key] ?? DailyLog()
+        return log.categoryMinutes.values.reduce(0, +)
+    }
+    
+    // MARK: - App Limit Logic
+    
+    private let appGroupSuiteName = "group.com.caca.adhd-helper"
+    
+    private func getUserDefaults() -> UserDefaults {
+        UserDefaults(suiteName: appGroupSuiteName) ?? UserDefaults.standard
+    }
+    
+    func addAppLimit(title: String, selection: FamilyActivitySelection, threshold: String) {
+        let limit = AppLimit(title: title, selection: selection, threshold: threshold)
+        appLimits.append(limit)
+        saveAppLimits()
+        
+        // Start monitoring
+        FamilyControlsManager.shared.startMonitoring(limit: limit)
+    }
+    
+    func deleteAppLimit(_ limit: AppLimit) {
+        appLimits.removeAll { $0.id == limit.id }
+        saveAppLimits()
+        
+        // Stop monitoring
+        FamilyControlsManager.shared.stopMonitoring(limit: limit)
+    }
+    
+    func toggleAppLimit(_ limit: AppLimit) {
+        if let index = appLimits.firstIndex(where: { $0.id == limit.id }) {
+            appLimits[index].isActive.toggle()
+            let updatedLimit = appLimits[index]
+            saveAppLimits()
+            
+            if updatedLimit.isActive {
+                FamilyControlsManager.shared.startMonitoring(limit: updatedLimit)
+            } else {
+                FamilyControlsManager.shared.stopMonitoring(limit: updatedLimit)
+            }
+        }
+    }
+    
+    private func saveAppLimits() {
+        let limitsToSave = appLimits
+        let defaults = getUserDefaults()
+        Task.detached(priority: .background) {
+            do {
+                let encoded = try JSONEncoder().encode(limitsToSave)
+                defaults.set(encoded, forKey: "ADHDAppLimits")
+            } catch {
+                print("Failed to save app limits: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func loadAppLimits() {
+        let defaults = getUserDefaults()
+        if let data = defaults.data(forKey: "ADHDAppLimits"),
+           let decoded = try? JSONDecoder().decode([AppLimit].self, from: data) {
+            self.appLimits = decoded
+        } else {
+            self.appLimits = []
+        }
+    }
+    
     // MARK: - Data Persistence
     
     private func saveHabits() {
@@ -345,10 +477,115 @@ final class CalendarViewModel: ObservableObject {
     }
 }
 
+// MARK: - Family Controls Manager
+
+@MainActor
+class FamilyControlsManager: ObservableObject {
+    static let shared = FamilyControlsManager()
+    
+    @Published var authorizationStatus: AuthorizationStatus = .notDetermined
+    
+    var isAuthorized: Bool {
+        authorizationStatus == .approved
+    }
+    
+    init() {
+        self.authorizationStatus = AuthorizationCenter.shared.authorizationStatus
+    }
+    
+    func requestAuthorization() async {
+        do {
+            try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+            self.authorizationStatus = AuthorizationCenter.shared.authorizationStatus
+        } catch {
+            print("Failed to request Family Controls authorization: \(error.localizedDescription)")
+        }
+    }
+    
+    func checkStatus() {
+        self.authorizationStatus = AuthorizationCenter.shared.authorizationStatus
+    }
+    
+    func startMonitoring(limit: AppLimit) {
+        guard limit.isActive else { return }
+        
+        let center = DeviceActivityCenter()
+        
+        // Schedule: daily monitoring
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalEnd: DateComponents(hour: 23, minute: 59),
+            repeats: true
+        )
+        
+        let minutes = thresholdToMinutes(limit.threshold)
+        let threshold = DateComponents(minute: minutes)
+        
+        let event = DeviceActivityEvent(
+            applications: limit.selection.applicationTokens,
+            categories: limit.selection.categoryTokens,
+            webDomains: limit.selection.webDomainTokens,
+            threshold: threshold
+        )
+        
+        let activityName = DeviceActivityName(limit.id.uuidString)
+        let eventName = DeviceActivityEvent.Name(limit.id.uuidString)
+        
+        do {
+            center.stopMonitoring([activityName])
+            try center.startMonitoring(activityName, during: schedule, events: [eventName: event])
+            print("Successfully started monitoring for limit \(limit.title) (threshold: \(minutes)m)")
+        } catch {
+            print("Error starting monitoring: \(error)")
+        }
+    }
+    
+    func stopMonitoring(limit: AppLimit) {
+        let center = DeviceActivityCenter()
+        let activityName = DeviceActivityName(limit.id.uuidString)
+        center.stopMonitoring([activityName])
+        print("Stopped monitoring for limit \(limit.title)")
+    }
+    
+    private func thresholdToMinutes(_ threshold: String) -> Int {
+        switch threshold {
+        case "1m": return 1
+        case "15m": return 15
+        case "30m": return 30
+        case "1h": return 60
+        case "2h": return 120
+        case "3h": return 180
+        default: return 30
+        }
+    }
+}
+
 // MARK: - Main View
 
 struct ContentView: View {
     @StateObject private var viewModel = CalendarViewModel()
+    @State private var selectedTab = 0
+    
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            DashboardView(viewModel: viewModel)
+                .tabItem {
+                    Label("Dashboard", systemImage: "square.grid.2x2.fill")
+                }
+                .tag(0)
+            
+            ScreenTimeView(viewModel: viewModel)
+                .tabItem {
+                    Label("Screen Time", systemImage: "hourglass")
+                }
+                .tag(1)
+        }
+        .accentColor(.indigo)
+    }
+}
+
+struct DashboardView: View {
+    @ObservedObject var viewModel: CalendarViewModel
     
     var body: some View {
         NavigationView {
@@ -378,6 +615,339 @@ struct ContentView: View {
                 }
             }
             .navigationBarHidden(true)
+        }
+        .navigationViewStyle(.stack)
+    }
+}
+
+// MARK: - Screen Time Views
+
+struct ScreenTimeView: View {
+    @ObservedObject var viewModel: CalendarViewModel
+    @StateObject private var familyControlsManager = FamilyControlsManager.shared
+    @State private var showAddLimitSheet = false
+    @State private var showDeleteConfirmation = false
+    @State private var limitToDelete: AppLimit? = nil
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                // Background Gradient
+                LinearGradient(
+                    colors: [
+                        Color(.systemGroupedBackground),
+                        Color(.secondarySystemBackground)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                
+                ScrollView {
+                    VStack(spacing: 20) {
+                        // Title Header with + Button
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("App Limits")
+                                    .font(.system(.title, design: .rounded))
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.primary)
+                                
+                                Text("Set daily limits to protect your focus")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            
+                            if familyControlsManager.isAuthorized {
+                                Button(action: { showAddLimitSheet = true }) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 28))
+                                        .foregroundColor(.indigo)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.top, 8)
+                        
+                        if !familyControlsManager.isAuthorized {
+                            // Authorization Required Card
+                            VStack(spacing: 16) {
+                                Image(systemName: "hand.raised.fill")
+                                    .font(.system(size: 50))
+                                    .foregroundColor(.indigo.opacity(0.8))
+                                    .padding(.top, 20)
+                                
+                                Text("Screen Time Access Required")
+                                    .font(.system(.headline, design: .rounded))
+                                    .foregroundColor(.primary)
+                                
+                                Text("Mindful Days requires Screen Time authorization to monitor device usage and enforce app block limits.")
+                                    .font(.system(.subheadline, design: .rounded))
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
+                                
+                                Button(action: {
+                                    Task {
+                                        await familyControlsManager.requestAuthorization()
+                                    }
+                                }) {
+                                    Text("Authorize Screen Time")
+                                        .font(.system(.subheadline, design: .rounded))
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 24)
+                                        .padding(.vertical, 12)
+                                        .background(Color.indigo)
+                                        .clipShape(Capsule())
+                                }
+                                .padding(.bottom, 20)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .cornerRadius(20)
+                            .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 5)
+                            .onAppear {
+                                familyControlsManager.checkStatus()
+                            }
+                        } else if viewModel.appLimits.isEmpty {
+                            // Empty State Card
+                            VStack(spacing: 16) {
+                                Image(systemName: "hourglass.badge.plus")
+                                    .font(.system(size: 50))
+                                    .foregroundColor(.indigo.opacity(0.6))
+                                    .padding(.top, 20)
+                                
+                                Text("No App Limits Yet")
+                                    .font(.system(.headline, design: .rounded))
+                                    .foregroundColor(.primary)
+                                
+                                Text("Protect your focus by setting daily time allowances for distracting applications.")
+                                    .font(.system(.subheadline, design: .rounded))
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
+                                
+                                Button(action: { showAddLimitSheet = true }) {
+                                    Text("Add App Limit")
+                                        .font(.system(.subheadline, design: .rounded))
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 20)
+                                        .padding(.vertical, 10)
+                                        .background(Color.indigo)
+                                        .clipShape(Capsule())
+                                }
+                                .padding(.bottom, 20)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .cornerRadius(20)
+                            .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 5)
+                        } else {
+                            // Limits List
+                            VStack(alignment: .leading, spacing: 16) {
+                                ForEach(viewModel.appLimits) { limit in
+                                    AppLimitRow(
+                                        limit: limit,
+                                        onToggle: {
+                                            viewModel.toggleAppLimit(limit)
+                                        }
+                                    )
+                                    .swipeToDelete {
+                                        viewModel.triggerHapticFeedback()
+                                        limitToDelete = limit
+                                        showDeleteConfirmation = true
+                                    }
+                                    .contextMenu {
+                                        Button(role: .destructive) {
+                                            viewModel.triggerHapticFeedback()
+                                            limitToDelete = limit
+                                            showDeleteConfirmation = true
+                                        } label: {
+                                            Label("Delete Limit", systemImage: "trash")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .navigationBarHidden(true)
+            .sheet(isPresented: $showAddLimitSheet) {
+                AddAppLimitSheet(viewModel: viewModel)
+            }
+            .confirmationDialog(
+                "Delete App Limit",
+                isPresented: $showDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Limit", role: .destructive) {
+                    if let limit = limitToDelete {
+                        viewModel.deleteAppLimit(limit)
+                    }
+                }
+                
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Are you sure you want to delete this app limit?")
+            }
+        }
+    }
+}
+
+struct AppLimitRow: View {
+    let limit: AppLimit
+    let onToggle: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 14) {
+            Text("⏳")
+                .font(.title2)
+                .frame(width: 44, height: 44)
+                .background(Color.indigo.opacity(0.15))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(limit.title)
+                    .font(.system(.body, design: .rounded))
+                    .fontWeight(.semibold)
+                    .foregroundColor(limit.isActive ? .primary : .secondary)
+                
+                HStack(spacing: 6) {
+                    Text(selectionDescription)
+                    Text("•")
+                    Text("⏳ Max \(limit.threshold)")
+                }
+                .font(.system(.caption, design: .rounded))
+                .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Toggle("", isOn: Binding(
+                get: { limit.isActive },
+                set: { _ in onToggle() }
+            ))
+            .labelsHidden()
+            .tint(.indigo)
+        }
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(16)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color(.separator), lineWidth: 1)
+        )
+    }
+    
+    private var selectionDescription: String {
+        let appCount = limit.selection.applicationTokens.count
+        let categoryCount = limit.selection.categoryTokens.count
+        
+        if appCount == 0 && categoryCount == 0 {
+            return "No apps"
+        } else if appCount > 0 && categoryCount == 0 {
+            return "\(appCount) \(appCount == 1 ? "app" : "apps")"
+        } else if appCount == 0 && categoryCount > 0 {
+            return "\(categoryCount) \(categoryCount == 1 ? "category" : "categories")"
+        } else {
+            return "\(appCount)a, \(categoryCount)c"
+        }
+    }
+}
+
+struct AddAppLimitSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @ObservedObject var viewModel: CalendarViewModel
+    
+    @State private var title: String = ""
+    @State private var selection = FamilyActivitySelection()
+    @State private var isPickerPresented = false
+    @State private var selectedThreshold: String = "30m"
+    
+    let thresholds = ["1m", "15m", "30m", "1h", "2h", "3h"]
+    
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Limit Details")) {
+                    TextField("Limit Title (e.g. Focus Hours)", text: $title)
+                }
+                
+                Section(header: Text("Select Apps & Categories")) {
+                    HStack {
+                        Text("Selected Apps")
+                        Spacer()
+                        Button(action: { isPickerPresented = true }) {
+                            Text(selectionText)
+                                .foregroundColor(.indigo)
+                        }
+                    }
+                    .familyActivityPicker(isPresented: $isPickerPresented, selection: $selection)
+                }
+                
+                Section(header: Text("Time Limit Threshold")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Daily limit allowance:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                            ForEach(thresholds, id: \.self) { thresh in
+                                Text(thresh)
+                                    .font(.system(.subheadline, design: .rounded))
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(selectedThreshold == thresh ? .white : .primary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(selectedThreshold == thresh ? Color.indigo : Color(.systemGroupedBackground))
+                                    .clipShape(Capsule())
+                                    .onTapGesture {
+                                        viewModel.triggerHapticFeedback()
+                                        selectedThreshold = thresh
+                                    }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Add App Limit")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let finalTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "App Limit" : title
+                        viewModel.addAppLimit(
+                            title: finalTitle,
+                            selection: selection,
+                            threshold: selectedThreshold
+                        )
+                        dismiss()
+                    }
+                    .disabled(selection.applicationTokens.isEmpty && selection.categoryTokens.isEmpty)
+                }
+            }
+        }
+    }
+    
+    private var selectionText: String {
+        let appCount = selection.applicationTokens.count
+        let categoryCount = selection.categoryTokens.count
+        if appCount == 0 && categoryCount == 0 {
+            return "Choose..."
+        } else {
+            return "\(appCount) apps, \(categoryCount) cats"
         }
     }
 }

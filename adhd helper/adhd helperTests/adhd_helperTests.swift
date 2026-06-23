@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import FamilyControls
 @testable import adhd_helper
 
 struct adhd_helperTests {
@@ -93,6 +94,63 @@ struct adhd_helperTests {
             // Should still be active tomorrow
             let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today)!
             #expect(viewModel.isHabitActive(updatedHabit, on: tomorrow) == true)
+        }
+    }
+
+    @Test func testScreenTimeLoggingAndLimits() async throws {
+        await MainActor.run {
+            let viewModel = CalendarViewModel()
+            let today = Date()
+            
+            // Check default limit
+            let defaultLimit = viewModel.getScreenTimeLimit(for: today)
+            #expect(defaultLimit == 180)
+            
+            // Modify limit
+            viewModel.setScreenTimeLimit(for: today, limit: 120)
+            #expect(viewModel.getScreenTimeLimit(for: today) == 120)
+            
+            // Check categories start at 0
+            let socialMinutes = viewModel.getCategoryMinutes(for: today, category: "Social")
+            #expect(socialMinutes == 0)
+            
+            // Update category minutes
+            viewModel.updateCategoryMinutes(for: today, category: "Social", minutes: 45)
+            #expect(viewModel.getCategoryMinutes(for: today, category: "Social") == 45)
+            #expect(viewModel.getTotalScreenTime(for: today) == 45)
+            
+            // Update another category
+            viewModel.updateCategoryMinutes(for: today, category: "Gaming", minutes: 30)
+            #expect(viewModel.getTotalScreenTime(for: today) == 75)
+            
+            // Check negative values are capped at 0
+            viewModel.updateCategoryMinutes(for: today, category: "Gaming", minutes: -15)
+            #expect(viewModel.getCategoryMinutes(for: today, category: "Gaming") == 0)
+        }
+    }
+
+    @Test func testAppLimitsAddingAndToggling() async throws {
+        await MainActor.run {
+            let viewModel = CalendarViewModel()
+            viewModel.appLimits = [] // Clear for isolation
+            
+            let selection = FamilyActivitySelection()
+            viewModel.addAppLimit(title: "Block Roblox", selection: selection, threshold: "1h")
+            #expect(viewModel.appLimits.count == 1)
+            #expect(viewModel.appLimits.first?.title == "Block Roblox")
+            #expect(viewModel.appLimits.first?.threshold == "1h")
+            #expect(viewModel.appLimits.first?.isActive == true)
+            
+            guard let limit = viewModel.appLimits.first else {
+                Issue.record("Failed to add limit")
+                return
+            }
+            
+            viewModel.toggleAppLimit(limit)
+            #expect(viewModel.appLimits.first?.isActive == false)
+            
+            viewModel.deleteAppLimit(limit)
+            #expect(viewModel.appLimits.isEmpty == true)
         }
     }
 }
