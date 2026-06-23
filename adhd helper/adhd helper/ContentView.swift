@@ -773,7 +773,7 @@ struct AddHabitSheet: View {
         self._date = State(initialValue: viewModel.selectedDate)
     }
     
-    private let presetEmojis = ["💊", "💧", "🏃", "🧘", "📚", "🍏", "☕️", "🛌", "🧹", "🧠", "🎯", "🚶", "📓", "🥦"]
+    private let presetEmojis = ["💊", "💧", "🏃", "🧘", "📚", "🍏", "☕️", "🛌", "🧹", "🧠", "🎯", "🚶", "📓", "🥦", "🪥", "🐦", "🐱"]
     
     private let curatedColorsHex = [
         "#007AFF", // Blue
