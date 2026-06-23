@@ -1,0 +1,17 @@
+# Xcode
+#
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdata
+project.xcworkspace/
+xcuserdata/
+
+# Personal Xcode settings
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.perspective
+
+# macOS
+.DS_Store
