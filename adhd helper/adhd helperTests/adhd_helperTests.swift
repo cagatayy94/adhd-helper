@@ -53,5 +53,47 @@ struct adhd_helperTests {
             }
         }
     }
+
+    @Test func testExcludeHabitSingleDay() async throws {
+        await MainActor.run {
+            let viewModel = CalendarViewModel()
+            viewModel.habits = [] // Reset for isolation
+            
+            let today = Date()
+            viewModel.addHabit(
+                title: "Test Habit",
+                description: "Test Desc",
+                icon: "💊",
+                colorHex: "#007AFF",
+                dailyGoal: 1,
+                repeatInterval: .daily,
+                duration: "5 min",
+                date: today
+            )
+            
+            guard let habit = viewModel.habits.first else {
+                Issue.record("Failed to create habit")
+                return
+            }
+            
+            // Should be active today
+            #expect(viewModel.isHabitActive(habit, on: today) == true)
+            
+            // Exclude for today
+            viewModel.excludeHabit(habit, on: today)
+            
+            guard let updatedHabit = viewModel.habits.first else {
+                Issue.record("Failed to find updated habit")
+                return
+            }
+            
+            // Should NOT be active today
+            #expect(viewModel.isHabitActive(updatedHabit, on: today) == false)
+            
+            // Should still be active tomorrow
+            let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today)!
+            #expect(viewModel.isHabitActive(updatedHabit, on: tomorrow) == true)
+        }
+    }
 }
 

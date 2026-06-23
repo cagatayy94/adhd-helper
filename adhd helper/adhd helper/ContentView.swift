@@ -248,6 +248,11 @@ final class CalendarViewModel: ObservableObject {
     }
     
     func isHabitActive(_ habit: Habit, on date: Date) -> Bool {
+        let key = keyFormatter.string(from: date)
+        if habit.excludedDates.contains(key) {
+            return false
+        }
+        
         let calendar = Calendar.current
         let startOfDayHabit = calendar.startOfDay(for: habit.date)
         let startOfDayTarget = calendar.startOfDay(for: date)
