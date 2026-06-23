@@ -642,7 +642,6 @@ struct ScreenTimeView: View {
     @State private var showAddLimitSheet = false
     @State private var showDeleteConfirmation = false
     @State private var limitToDelete: AppLimit? = nil
-    @State private var isTestShieldActive = false
     
     var body: some View {
         NavigationView {
@@ -789,36 +788,6 @@ struct ScreenTimeView: View {
                                 }
                             }
                         }
-                        
-                        // Debug & Test Card
-                        if familyControlsManager.isAuthorized && !viewModel.appLimits.isEmpty {
-                            VStack(alignment: .leading, spacing: 12) {
-                                HStack {
-                                    Text("🧪 Test Block Instantly")
-                                        .font(.system(.headline, design: .rounded))
-                                        .foregroundColor(.primary)
-                                    Spacer()
-                                }
-                                
-                                Text("Toggle this to verify that Apple's Shield API works on your device. When turned on, your selected apps will be blocked immediately.")
-                                    .font(.system(.caption, design: .rounded))
-                                    .foregroundColor(.secondary)
-                                
-                                Toggle("Block Selected Apps Now", isOn: Binding(
-                                    get: { isTestShieldActive },
-                                    set: { value in
-                                        isTestShieldActive = value
-                                        triggerDirectShield(active: value)
-                                    }
-                                ))
-                                .tint(.red)
-                                .padding(.top, 4)
-                            }
-                            .padding()
-                            .background(Color(.secondarySystemGroupedBackground))
-                            .cornerRadius(20)
-                            .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 5)
-                        }
                     }
                     .padding()
                 }
@@ -842,24 +811,6 @@ struct ScreenTimeView: View {
             } message: {
                 Text("Are you sure you want to delete this app limit?")
             }
-        }
-    }
-    
-    private func triggerDirectShield(active: Bool) {
-        viewModel.triggerHapticFeedback()
-        let store = ManagedSettingsStore()
-        if active {
-            var appTokens = Set<ApplicationToken>()
-            var catTokens = Set<ActivityCategoryToken>()
-            for limit in viewModel.appLimits where limit.isActive {
-                appTokens.formUnion(limit.selection.applicationTokens)
-                catTokens.formUnion(limit.selection.categoryTokens)
-            }
-            store.shield.applications = appTokens
-            store.shield.applicationCategories = ShieldSettings.ActivityCategoryPolicy.specific(catTokens)
-        } else {
-            store.shield.applications = nil
-            store.shield.applicationCategories = nil
         }
     }
 }
@@ -952,7 +903,6 @@ struct AddAppLimitSheet: View {
                                 .foregroundColor(.indigo)
                         }
                     }
-                    .familyActivityPicker(isPresented: $isPickerPresented, selection: $selection)
                 }
                 
                 Section(header: Text("Time Limit Threshold")) {
@@ -981,6 +931,7 @@ struct AddAppLimitSheet: View {
                     }
                 }
             }
+            .familyActivityPicker(isPresented: $isPickerPresented, selection: $selection)
             .navigationTitle("Add App Limit")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
